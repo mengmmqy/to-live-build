@@ -1,0 +1,63 @@
+name: Build iOS app
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Gitee branch or tag to build
+        required: true
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-build
+  cancel-in-progress: false
+
+jobs:
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Fetch current source from Gitee
+        run: |
+          git clone --depth 1 --branch "${{ inputs.ref }}" --single-branch https://gitee.com/hao_ziyi/to-live.git source
+          commit=$(git -C source rev-parse HEAD)
+          echo "Source: https://gitee.com/hao_ziyi/to-live/commit/$commit" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Show toolchain and project targets
+        working-directory: source/mobile/apple
+        run: |
+          xcodebuild -version
+          xcodebuild -list -project ToLive.xcodeproj
+
+      - name: Build unsigned device app
+        working-directory: source/mobile/apple
+        run: |
+          xcodebuild -project ToLive.xcodeproj -target ToLive -configuration Release -sdk iphoneos \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            CONFIGURATION_BUILD_DIR="$PWD/build/ios" build
+
+      - name: Package unsigned IPA
+        working-directory: source/mobile/apple
+        run: |
+          set -e
+          app="build/ios/To Live.app"
+          test -d "$app" || { echo "app bundle missing"; ls -R build | head -60; exit 1; }
+          lipo -info "$app/To Live" | tee /dev/stderr | grep -q arm64
+          version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Info.plist")
+          mkdir -p Payload
+          cp -R "$app" Payload/
+          zip -qry "ToLive-${version}-unsigned.ipa" Payload
+          shasum -a 256 "ToLive-${version}-unsigned.ipa"
+          unzip -l "ToLive-${version}-unsigned.ipa"
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: To-Live-iOS-unsigned-${{ github.run_number }}
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+          path: source/mobile/apple/ToLive-*.ipa
