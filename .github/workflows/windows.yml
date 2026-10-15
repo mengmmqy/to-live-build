@@ -1,0 +1,75 @@
+name: Build Windows installer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-build
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      PYTHONUTF8: '1'
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - name: Fetch current source from Gitee
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch main --single-branch https://gitee.com/hao_ziyi/to-live.git source
+          if ($LASTEXITCODE -ne 0) { throw 'Could not fetch Gitee source' }
+          $commit = git -C source rev-parse HEAD
+          "Source: https://gitee.com/hao_ziyi/to-live/commit/$commit" >> $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: source/package-lock.json
+
+      - name: Download and verify Windows media tools
+        run: python source/desktop/fetch_windows_tools.py --output source/work/windows-tools
+
+      - name: Test and build the Windows application
+        working-directory: source
+        shell: pwsh
+        run: ./desktop/build-windows.ps1 -ToolsDir "$env:GITHUB_WORKSPACE/source/work/windows-tools" -Python (Get-Command python).Source
+
+      - name: Record checksums and source version
+        working-directory: source
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem dist/desktop -File | Where-Object { $_.Extension -in '.exe', '.zip' }
+          if ($files.Count -lt 2) { throw 'Installer or ZIP is missing' }
+          $files | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)"
+          } | Set-Content dist/desktop/SHA256SUMS.txt -Encoding ascii
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $commit = git rev-parse HEAD
+          @{ version = $version; source_commit = $commit; source_repository = 'https://gitee.com/hao_ziyi/to-live' } |
+            ConvertTo-Json | Set-Content dist/desktop/build-info.json -Encoding utf8
+          "`nVersion: $version. Download the Windows artifact below (retained for 1 day)." >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload installer, ZIP and verification report
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: To-Live-Windows-x64-${{ github.run_number }}
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+          path: |
+            source/dist/desktop/*.exe
+            source/dist/desktop/*.zip
+            source/dist/desktop/SHA256SUMS.txt
+            source/dist/desktop/build-info.json
+            source/outputs/packaged-backend.json
